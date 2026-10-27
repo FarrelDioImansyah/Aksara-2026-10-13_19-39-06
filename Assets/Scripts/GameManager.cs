@@ -1,44 +1,97 @@
-using System;
 using System.Collections;
 using UnityEngine;
 using UnityEngine.Networking;
-using UnityEngine.UI;
+using UnityEngine.Video;
+using TMPro;
 
 public class GameManager : MonoBehaviour
 {
     [Header("Configuration Asset")]
     public GameConfig config;
 
-    [Header("Card Prefab Reference")]
-    public GameObject cardPrefab; // Masukkan Prefab Card_petangen ke sini
-    public Transform spawnPoint;  // Tempat posisi kemunculan kartu (opsional)
+    [Header("Video References")]
+    public VideoPlayer videoPlayer;
+    public VideoClip loopVideo;          // loop mallpract
+    public VideoClip transitionVideo;    // send transisi contoh
+    public VideoClip giriVideo;          // JARAK GIRI   (id_kartu = 1)
+    public VideoClip lengkaraVideo;      // JARAK LENGKARA (id_kartu = 2)
+    public VideoClip srigatiVideo;       // JARAK SRIGATI  (id_kartu = 3)
+
+    [Header("UI Nama & Bingkai (3D Object)")]
+    public Transform bingkaiNama;        // Objek BingkaiNama (Empty Object)
+    public TextMeshPro userNameText;     // Komponen TextMeshPro 3D
+    public Transform startPoint;         // Empty object posisi bawah
+    public Transform targetPoint;        // Empty object posisi tengah
 
     [Header("Audio References")]
     public AudioSource audioSource;
-    public AudioClip[] narrationClips;
 
     [Header("Settings")]
     public float pollInterval = 3f;
+    public float animationDuration = 1f;
+
     private string lastProcessedUserId = "";
+    private bool isProcessingSequence = false;
 
     void Start()
     {
-        if (audioSource == null)
-            audioSource = GetComponent<AudioSource>();
+        if (audioSource == null) audioSource = GetComponent<AudioSource>();
 
-        if (config == null)
+        // Sembunyikan bingkai di awal
+        if (bingkaiNama != null) bingkaiNama.gameObject.SetActive(false);
+
+        // Mulai Standby
+        PlayLoopVideo();
+
+        // Jalankan pengecekan Supabase terus menerus
+        StartCoroutine(PollLatestUserData());
+    }
+
+    void PlayLoopVideo()
+    {
+        if (videoPlayer != null && loopVideo != null)
         {
-            Debug.LogWarning("GameConfig belum dimasukkan ke GameManager Inspector!");
+            videoPlayer.clip = loopVideo;
+            videoPlayer.isLooping = true;
+            videoPlayer.Play();
         }
 
-        StartCoroutine(PollLatestUserData());
+        if (audioSource != null)
+        {
+            AudioClip loopAudio = Resources.Load<AudioClip>("AudioNarasi/Loop");
+            if (loopAudio != null)
+            {
+                audioSource.clip = loopAudio;
+                audioSource.loop = true; // Audio latar belakang diatur looping
+                audioSource.Play();
+            }
+            else
+            {
+                Debug.LogWarning("Audio 'Loop' tidak ditemukan di folder Resources/AudioNarasi/!");
+            }
+        }
+    }
+
+    void PlayNarration(int idKartu)
+    {
+        string audioPath = "AudioNarasi/card_" + idKartu;
+        AudioClip clip = Resources.Load<AudioClip>(audioPath);
+        if (clip != null)
+        {
+            audioSource.clip = clip;
+            audioSource.loop = false; // Narasi kartu diputar sekali saja
+            audioSource.Play();
+        }
     }
 
     IEnumerator PollLatestUserData()
     {
         while (true)
         {
-            yield return StartCoroutine(FetchLatestUserFromSupabase());
+            if (!isProcessingSequence)
+            {
+                yield return StartCoroutine(FetchLatestUserFromSupabase());
+            }
             yield return new WaitForSeconds(pollInterval);
         }
     }
@@ -56,12 +109,7 @@ public class GameManager : MonoBehaviour
 
             if (request.result == UnityWebRequest.Result.Success)
             {
-                string jsonResult = request.downloadHandler.text;
-                ParseUserData(jsonResult);
-            }
-            else
-            {
-                Debug.LogError("Gagal mengambil data dari Supabase: " + request.error);
+                ParseUserData(request.downloadHandler.text);
             }
         }
     }
@@ -75,99 +123,95 @@ public class GameManager : MonoBehaviour
         {
             UserData latestUser = dataList.users[0];
 
-            if (latestUser.id != lastProcessedUserId)
+            if (latestUser.id != lastProcessedUserId && !isProcessingSequence)
             {
                 lastProcessedUserId = latestUser.id;
-                Debug.Log("Data baru ditemukan! Nama: " + latestUser.nama_latin + " | ID Kartu: " + latestUser.id_kartu);
-
-                // 1. Spawn prefab kartu dan download gambarnya secara otomatis
-                SpawnAndSetupCard(latestUser);
-
-                // 2. Putar narasi audio berdasarkan id_kartu
-                PlayNarration(latestUser.id_kartu);
+                StartCoroutine(ExecutePhotoboothSequence(latestUser));
             }
         }
     }
 
-    void SpawnAndSetupCard(UserData user)
+    IEnumerator ExecutePhotoboothSequence(UserData user)
     {
-        if (cardPrefab == null)
+        isProcessingSequence = true;
+
+        // ==========================================
+        // FASE 2: TRANSISI, AUDIO TRANSISI, & ANIMASI NAMA NAIK
+        // ==========================================
+        videoPlayer.isLooping = false;
+        videoPlayer.clip = transitionVideo;
+        videoPlayer.Play();
+
+        string transitionAudioPath = "AudioNarasi/Send Doa 13 sec";
+        AudioClip transAudio = Resources.Load<AudioClip>(transitionAudioPath);
+        if (transAudio != null)
         {
-            Debug.LogError("Card Prefab belum dimasukkan ke GameManager Inspector!");
-            return;
-        }
-
-        Vector3 spawnPosition = spawnPoint != null ? spawnPoint.position : Vector3.zero;
-
-        // Membalikkan rotasi menghadap kamera atau membalikkan sumbu jika terbalik
-        Quaternion spawnRotation = spawnPoint != null ? spawnPoint.rotation : Quaternion.identity;
-
-        GameObject newCard = Instantiate(cardPrefab, spawnPosition, spawnRotation);
-
-        // --- SOLUSI JIKA TERBALIK SECARA VERTIKAL ---
-        // Membalikkan skala Y prefab jika gambarnya terbalik atas-bawah
-        Vector3 currentScale = newCard.transform.localScale;
-        newCard.transform.localScale = new Vector3(currentScale.x, -currentScale.y, currentScale.z);
-        // -------------------------------------------
-
-        RawImage targetRawImage = newCard.GetComponentInChildren<RawImage>();
-
-        if (targetRawImage != null && !string.IsNullOrEmpty(user.url_kartu))
-        {
-            StartCoroutine(LoadCardImageFromUrl(user.url_kartu, targetRawImage));
-        }
-    }
-
-    IEnumerator LoadCardImageFromUrl(string imageUrl, RawImage targetImage)
-    {
-        using (UnityWebRequest uwr = UnityWebRequestTexture.GetTexture(imageUrl))
-        {
-            yield return uwr.SendWebRequest();
-
-            if (uwr.result == UnityWebRequest.Result.Success)
-            {
-                Texture2D tex = DownloadHandlerTexture.GetContent(uwr);
-                targetImage.texture = tex;
-                Debug.Log("Gambar kartu berhasil dimuat ke prefab yang di-generate!");
-            }
-            else
-            {
-                Debug.LogError("Gagal mendownload gambar kartu: " + uwr.error);
-            }
-        }
-    }
-
-    void PlayNarration(int idKartu)
-    {
-        string audioPath = "AudioNarasi/card_" + idKartu;
-        AudioClip clipToPlay = Resources.Load<AudioClip>(audioPath);
-
-        if (clipToPlay != null)
-        {
-            audioSource.clip = clipToPlay;
+            audioSource.clip = transAudio;
+            audioSource.loop = false;
             audioSource.Play();
-            Debug.Log("Berhasil memuat dan memutar narasi otomatis untuk ID Kartu: " + idKartu);
         }
-        else
+
+        if (bingkaiNama != null && userNameText != null)
         {
-            Debug.LogWarning("File audio dengan path 'Resources/" + audioPath + "' tidak ditemukan!");
+            userNameText.text = user.nama_latin;
+            bingkaiNama.gameObject.SetActive(true);
+            StartCoroutine(AnimateBingkaiMoveUp(animationDuration));
+        }
+
+        yield return null;
+        yield return new WaitUntil(() => videoPlayer.isPlaying);
+        yield return new WaitUntil(() => !videoPlayer.isPlaying);
+
+        // ==========================================
+        // FASE 3: VIDEO HASIL & AUDIO NARASI KARTU
+        // ==========================================
+        videoPlayer.clip = GetVideoClipByCardId(user.id_kartu);
+        videoPlayer.isLooping = false;
+        videoPlayer.Play();
+
+        PlayNarration(user.id_kartu);
+
+        yield return new WaitUntil(() => !videoPlayer.isPlaying && !audioSource.isPlaying);
+
+        // ==========================================
+        // FASE 4: RESET
+        // ==========================================
+        if (bingkaiNama != null) bingkaiNama.gameObject.SetActive(false);
+        PlayLoopVideo();
+        isProcessingSequence = false;
+    }
+
+    IEnumerator AnimateBingkaiMoveUp(float duration)
+    {
+        float elapsedTime = 0f;
+        Vector3 startPos = startPoint.position;
+        Vector3 targetPos = targetPoint.position;
+
+        bingkaiNama.position = startPos;
+
+        while (elapsedTime < duration)
+        {
+            bingkaiNama.position = Vector3.Lerp(startPos, targetPos, elapsedTime / duration);
+            elapsedTime += Time.deltaTime;
+            yield return null;
+        }
+
+        bingkaiNama.position = targetPos;
+    }
+
+    VideoClip GetVideoClipByCardId(int idKartu)
+    {
+        switch (idKartu)
+        {
+            case 1: return giriVideo;
+            case 2: return lengkaraVideo;
+            case 3: return srigatiVideo;
+            default: return giriVideo;
         }
     }
 }
 
 [System.Serializable]
-public class UserData
-{
-    public string id;
-    public string created_at;
-    public string nama_latin;
-    public string nama_panggilan;
-    public int id_kartu;
-    public string url_kartu;
-}
-
+public class UserData { public string id, created_at, nama_latin, nama_panggilan, url_kartu; public int id_kartu; }
 [System.Serializable]
-public class UserDataList
-{
-    public UserData[] users;
-}
+public class UserDataList { public UserData[] users; }
